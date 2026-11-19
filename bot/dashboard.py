@@ -48,6 +48,7 @@ class DashboardServer:
         self._trade_history: deque[dict] = deque(maxlen=TRADE_HISTORY_LIMIT)
         self._starting_balance: float | None = None
         self._current_balance: float | None = None
+        self._starting_equity: float | None = None
         self._last_balance_poll = 0.0
         self._balance_history: deque[tuple[float, float]] = deque(maxlen=BALANCE_HISTORY_LIMIT)
         self._resolutions: dict[str, str] = {}
@@ -240,13 +241,24 @@ class DashboardServer:
         except Exception as exc:
             logger.debug("Trade ledger poll error: %s", exc)
 
+    def _positions_value(self) -> float:
+        if self._portfolio_state is None:
+            return 0.0
+        try:
+            positions = self._portfolio_state.snapshot().positions
+        except Exception:
+            return 0.0
+        return sum(float(getattr(position, "current_value", 0.0) or 0.0) for position in positions)
+
     def _make_pnl_message(self) -> dict:
-        pnl_usd = (self._current_balance or 0.0) - (self._starting_balance or 0.0)
-        pnl_pct = (
-            (pnl_usd / self._starting_balance * 100.0)
-            if self._starting_balance and self._starting_balance > 0
-            else 0.0
-        )
+        # PnL is measured on equity (cash + open positions at current value), so
+        # buying a position is not counted as a loss.
+        if self._starting_equity is None and self._starting_balance is not None:
+            self._starting_equity = self._starting_balance + self._positions_value()
+        starting_equity = self._starting_equity or 0.0
+        current_equity = (self._current_balance or 0.0) + self._positions_value()
+        pnl_usd = current_equity - starting_equity
+        pnl_pct = (pnl_usd / starting_equity * 100.0) if starting_equity > 0 else 0.0
         return {
             "type": "session_pnl",
             "starting_balance": round(self._starting_balance or 0.0, 2),
