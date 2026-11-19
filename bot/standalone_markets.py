@@ -346,7 +346,10 @@ def _parse_retry_after_seconds(headers) -> float | None:
 
 
 async def _iter_open_market_batches(session: aiohttp.ClientSession):
+    # The plain /markets endpoint rejects offsets beyond a few thousand, so page
+    # with the keyset endpoint and its opaque cursor instead.
     offset = 0
+    cursor: str | None = None
     pages_in_burst = 0
     retries = 0
     while True:
@@ -354,11 +357,12 @@ async def _iter_open_market_batches(session: aiohttp.ClientSession):
             "active": "true",
             "closed": "false",
             "limit": str(PAGE_LIMIT),
-            "offset": str(offset),
         }
+        if cursor:
+            params["after_cursor"] = cursor
         try:
             async with session.get(
-                f"{GAMMA_API}/markets",
+                f"{GAMMA_API}/markets/keyset",
                 params=params,
                 headers={"User-Agent": "polymarket-scanner/1.0"},
             ) as resp:
@@ -392,6 +396,10 @@ async def _iter_open_market_batches(session: aiohttp.ClientSession):
             raise GammaMarketFetchError(f"gamma_markets_fetch_failed offset={offset}") from exc
 
         retries = 0
+        next_cursor = None
+        if isinstance(batch, dict):
+            next_cursor = batch.get("next_cursor")
+            batch = batch.get("markets")
         if not isinstance(batch, list) or not batch:
             return
 
@@ -399,8 +407,9 @@ async def _iter_open_market_batches(session: aiohttp.ClientSession):
 
         offset += len(batch)
         pages_in_burst += 1
-        if len(batch) < PAGE_LIMIT:
+        if len(batch) < PAGE_LIMIT or not next_cursor:
             return
+        cursor = next_cursor
         await asyncio.sleep(PAGE_DELAY_SEC)
         if pages_in_burst >= PAGE_BURST_SIZE:
             await asyncio.sleep(PAGE_BURST_PAUSE_SEC)

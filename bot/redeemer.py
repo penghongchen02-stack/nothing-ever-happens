@@ -158,7 +158,7 @@ class Redeemer:
                     if len(page) < POSITIONS_PAGE_LIMIT:
                         return positions
                     offset += len(page)
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(trust_env=True) as session:
                 while True:
                     page = await self._do_fetch(session, offset=offset)
                     positions.extend(page)

@@ -125,7 +125,7 @@ async def _check_gamma_resolution(market_slug: str) -> str | None:
     return None so the settlement worker retries later.
     """
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(trust_env=True) as session:
             async with session.get(
                 f"{GAMMA_API_URL}/markets",
                 params={"slug": market_slug},
