@@ -72,6 +72,13 @@ def _build_exchange(exchange_cfg):
         from bot.exchange.polymarket_clob import PolymarketClobExchangeClient
 
         return PolymarketClobExchangeClient(exchange_cfg, allow_trading=True)
+    if os.getenv("PAPER_REAL_BOOKS", "true").strip().lower() in {"1", "true", "yes"}:
+        # Paper fills against real polymarket.com order books (public, no key needed).
+        from bot.exchange.polymarket_clob import PolymarketClobExchangeClient
+        from bot.exchange.real_book_paper import RealBookPaperExchangeClient
+
+        public_books = PolymarketClobExchangeClient(exchange_cfg, allow_trading=False)
+        return RealBookPaperExchangeClient(public_books.get_order_book)
     return PaperExchangeClient()
 
 

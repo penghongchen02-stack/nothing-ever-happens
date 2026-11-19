@@ -25,17 +25,8 @@ import threading
 import time
 from dataclasses import dataclass
 
-from bot.exchange.paper import PaperExchangeClient
-from bot.models import (
-    MarketOrderIntent,
-    MarketRules,
-    OpenOrder,
-    OrderBookLevel,
-    OrderBookSnapshot,
-    OrderResult,
-    Side,
-    Trade,
-)
+from bot.exchange.real_book_paper import RealBookPaperExchangeClient
+from bot.models import MarketRules, OrderBookLevel, OrderBookSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -261,14 +252,16 @@ class PolymarketUSBookFeed:
             self.handle_message(raw)
 
 
-class PolymarketUSPaperExchangeClient(PaperExchangeClient):
+class PolymarketUSPaperExchangeClient(RealBookPaperExchangeClient):
     """Paper trading against real Polymarket US NO-side order books."""
 
+    order_id_prefix = "paper-us"
+
     def __init__(self, feed: PolymarketUSBookFeed, *, initial_collateral_balance: float = 100.0) -> None:
-        super().__init__(initial_collateral_balance=initial_collateral_balance)
+        super().__init__(self._book_from_feed, initial_collateral_balance=initial_collateral_balance)
         self.feed = feed
 
-    def get_order_book(self, token_id: str) -> OrderBookSnapshot:
+    def _book_from_feed(self, token_id: str) -> OrderBookSnapshot:
         self.feed.watch(token_id)
         book = self.feed.get_no_book(token_id)
         if book is None:
@@ -276,71 +269,6 @@ class PolymarketUSPaperExchangeClient(PaperExchangeClient):
             raise BookNotReadyError(f"us_book_not_ready slug={token_id} reason={reason}")
         return book
 
-    def get_mid_price(self, token_id: str) -> float:
-        book = self.get_order_book(token_id)
-        best_bid = max((lvl.price for lvl in book.bids), default=0.0)
-        best_ask = min((lvl.price for lvl in book.asks), default=0.0)
-        if best_bid and best_ask:
-            return (best_bid + best_ask) / 2
-        return best_ask or best_bid
-
     def get_market_rules(self, token_id: str) -> MarketRules:
         _ = token_id
         return MarketRules(tick_size=DEFAULT_TICK_SIZE, min_order_size=1.0)
-
-    def place_market_order(self, order: MarketOrderIntent) -> OrderResult:
-        if order.side != Side.BUY:
-            return super().place_market_order(order)
-
-        book = self.get_order_book(order.token_id)
-        price_cap = order.price_cap if order.price_cap is not None else 1.0
-        if order.reference_price and order.allowed_slippage is not None:
-            price_cap = min(price_cap, order.reference_price + order.allowed_slippage)
-
-        budget = min(float(order.amount), self._collateral_balance)
-        spent = 0.0
-        shares = 0.0
-        for level in book.asks:
-            if level.price > price_cap + 1e-9 or budget - spent <= 1e-9:
-                break
-            take_usd = min(level.price * level.size, budget - spent)
-            spent += take_usd
-            shares += take_usd / level.price
-
-        self._counter += 1
-        oid = f"paper-us-{int(time.time())}-{self._counter}"
-        if shares <= 0:
-            return OrderResult(order_id=oid, status="unmatched", raw={"order": order, "reason": "no_liquidity_within_cap"})
-
-        fill_price = spent / shares
-        self._conditional_balances[order.token_id] = self._conditional_balances.get(order.token_id, 0.0) + shares
-        self._collateral_balance = max(0.0, self._collateral_balance - spent)
-        self._trades.append(
-            Trade(
-                trade_id=f"{oid}-fill",
-                order_id=oid,
-                token_id=order.token_id,
-                side=order.side,
-                price=fill_price,
-                size=shares,
-                timestamp=int(time.time()),
-            )
-        )
-        self._orders_by_id[oid] = OpenOrder(
-            order_id=oid,
-            token_id=order.token_id,
-            side=order.side,
-            price=fill_price,
-            size_matched=shares,
-            original_size=shares,
-            status="matched",
-        )
-        raw = {
-            "order": order,
-            "_market_price": fill_price,
-            "_buffered_price": fill_price,
-            "_fill_price": fill_price,
-            "makingAmount": str(spent),
-            "takingAmount": str(shares),
-        }
-        return OrderResult(order_id=oid, status="matched", raw=raw)
