@@ -114,3 +114,50 @@ def test_halted_market_has_empty_book():
     feed.handle_message(_md("m", bids=[(0.4, 10)], offers=[(0.5, 10)], state="MARKET_STATE_HALTED"))
     book = feed.get_no_book("m")
     assert book is not None and book.asks == () and book.bids == ()
+
+
+@pytest.mark.asyncio
+async def test_feed_connects_signs_subscribes_and_caches_books(monkeypatch):
+    import asyncio
+    import base64
+
+    from nacl.signing import SigningKey
+    from websockets.asyncio.server import serve
+
+    for var in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(var, raising=False)
+
+    seen = {}
+
+    async def handler(ws):
+        seen["path"] = ws.request.path
+        seen["auth"] = all(ws.request.headers.get(h) for h in ("X-PM-Access-Key", "X-PM-Timestamp", "X-PM-Signature"))
+        async for raw in ws:
+            sub = json.loads(raw)["subscribe"]
+            seen["sub"] = sub
+            for slug in sub["marketSlugs"]:
+                await ws.send(_md(slug, bids=[(0.42, 20)], offers=[(0.47, 9)]))
+
+    secret = base64.b64encode(bytes(SigningKey.generate())).decode()
+    async with serve(handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        feed = PolymarketUSBookFeed(key_id="k", secret_key=secret, base_url=f"ws://127.0.0.1:{port}")
+        client = PolymarketUSPaperExchangeClient(feed)
+        shutdown = asyncio.Event()
+        task = asyncio.create_task(feed.run(shutdown))
+        with pytest.raises(BookNotReadyError):
+            client.get_order_book("m")  # registers the slug for subscription
+        for _ in range(50):
+            await asyncio.sleep(0.05)
+            if feed.get_no_book("m") is not None:
+                break
+        book = client.get_order_book("m")
+        shutdown.set()
+        await asyncio.wait_for(task, 5)
+
+    assert seen["path"] == "/v1/ws/markets"
+    assert seen["auth"]
+    assert seen["sub"]["subscriptionType"] == "SUBSCRIPTION_TYPE_MARKET_DATA"
+    assert seen["sub"]["marketSlugs"] == ["m"]
+    assert book.asks[0].price == pytest.approx(0.58)
+    assert book.bids[0].price == pytest.approx(0.53)
