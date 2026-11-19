@@ -43,6 +43,30 @@ def _validate_live_runtime(exchange_cfg, database_url: str | None) -> None:
         raise ValueError("DATABASE_URL is required when live order transmission is enabled")
 
 
+def _resolve_venue() -> str:
+    venue = (os.getenv("POLYMARKET_VENUE") or "global").strip().lower()
+    if venue not in {"global", "us"}:
+        raise ValueError(f"POLYMARKET_VENUE must be 'global' or 'us', got {venue!r}")
+    return venue
+
+
+def _build_us_venue(exchange_cfg):
+    """Return (exchange, book_feed, market_fetcher) for Polymarket US."""
+    if exchange_cfg.live_send_enabled:
+        raise RuntimeError(
+            "Live order transmission is not implemented for POLYMARKET_VENUE=us yet; "
+            "run with BOT_MODE=paper / DRY_RUN=true"
+        )
+    from bot.exchange.polymarket_us import PolymarketUSBookFeed, PolymarketUSPaperExchangeClient
+    from bot.us_markets import fetch_us_candidate_markets
+
+    feed = PolymarketUSBookFeed(
+        key_id=os.getenv("POLYMARKET_KEY_ID"),
+        secret_key=os.getenv("POLYMARKET_SECRET_KEY"),
+    )
+    return PolymarketUSPaperExchangeClient(feed), feed, fetch_us_candidate_markets
+
+
 def _build_exchange(exchange_cfg):
     if exchange_cfg.live_send_enabled:
         from bot.exchange.polymarket_clob import PolymarketClobExchangeClient
@@ -115,7 +139,14 @@ async def run():
         },
     )
 
-    exchange = _build_exchange(exchange_cfg)
+    venue = _resolve_venue()
+    us_book_feed = None
+    market_fetcher = None
+    if venue == "us":
+        exchange, us_book_feed, market_fetcher = _build_us_venue(exchange_cfg)
+    else:
+        exchange = _build_exchange(exchange_cfg)
+    logger.info("venue_selected", extra={"venue": venue})
     portfolio_state = PortfolioState()
     nothing_happens_control = NothingHappensControlState()
     background_executor = ThreadPoolExecutor(
@@ -212,8 +243,11 @@ async def run():
                 control_state=nothing_happens_control,
                 recovery_coordinator=recovery,
                 wallet_address=strategy_wallet_address,
+                market_fetcher=market_fetcher,
             ),
         }
+        if us_book_feed is not None:
+            feed_factories["us_book_feed"] = lambda: us_book_feed.run(shutdown)
         if recovery is not None and exchange_cfg.live_send_enabled:
             feed_factories["ambiguous_recovery"] = lambda: recovery.run_ambiguous_worker(
                 exchange=exchange,
